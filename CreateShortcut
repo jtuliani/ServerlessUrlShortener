@@ -1,0 +1,211 @@
+#r "Newtonsoft.Json"
+#r "Microsoft.WindowsAzure.Storage"
+using Microsoft.WindowsAzure.Storage.Table;
+using System.Net;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Primitives;
+using Newtonsoft.Json;
+
+public static async Task<IActionResult> Run(HttpRequest req, CloudTable lookupTable, ILogger log)
+{
+    Response response = new Response();
+
+    // Parse query parameter for 'uri'; remove quotes if present
+    response.originalUri = req.Query["uri"];
+
+    if (response.originalUri == null)
+    {
+        response.message = "Please pass a URI to shorten using the 'uri' query string parameter";
+        return new BadRequestObjectResult(response);
+    }
+
+    log.LogInformation($"Input URI: {response.originalUri}");
+    
+    try
+    {
+        response.parsedUri = (new System.Uri(response.originalUri)).ToString();
+        log.LogInformation($"Successfull parsed input URI {response.originalUri} into URI {response.parsedUri}");
+        
+        // First, look for an existing matching shortcut
+        string encodedUri = EncodeUri(response.parsedUri);
+        string pk = UriToPartitionKey(response.parsedUri);
+    
+        log.LogInformation($"Looking for pre-existing reverse lookup: ({pk},{encodedUri}) ...");
+
+        // Construct table query
+        TableQuery<Lookup> query = new TableQuery<Lookup>().Where(
+                TableQuery.CombineFilters(
+                    TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, pk),
+                    TableOperators.And,
+                    TableQuery.GenerateFilterCondition("RowKey", QueryComparisons.Equal, encodedUri)));
+
+        // Execute the query and loop through the results (but we'll just use the first result)
+        foreach (Lookup lookup in await lookupTable.ExecuteQuerySegmentedAsync(query, null))
+        {
+            response.shortcut = ShortcodeToUri(lookup.shortcode);
+            response.message = "Existing shortcut found";
+            
+            log.LogInformation($"Found existing shortcut: {response.shortcut}");
+
+            return new OkObjectResult(response);
+        }
+
+        // Create new shortcut
+        response.shortcut = await CreateShortcut(response.parsedUri, encodedUri, pk, lookupTable, log);
+        response.message = "New shortcut created";
+        return new OkObjectResult(response);
+    }
+    catch (UriFormatException e)
+    {
+        log.LogInformation($"Exception parsing input URI, message: {e.Message}");
+        response.message = $"Invalid input URL '{response.originalUri}'";
+        return new BadRequestObjectResult(response);
+    }
+    catch (Exception e)
+    {
+        log.LogInformation($"Exception creating shortcut: {e.Message}");
+        response.message = $"Internal error creating shortcut for URL string '{response.originalUri}'";
+        return new StatusCodeResult(500);
+    }
+}
+
+public static async Task<string> CreateShortcut(string uri, string encodedUri, string pk, CloudTable lookupTable, ILogger log)
+{
+    // Look up indexCounter for this partition, need that to generate new shortcode
+    log.LogInformation($"Creating new shortcut. Looking up IndexCounter: ({pk},{IndexCounterRowKey}) ...");
+
+    // Batch operation we'll use to write the shortcut entries to the lookup table
+    TableBatchOperation batchOperation = new TableBatchOperation();
+
+    // Construct table query
+    TableQuery<IndexCounter> query = new TableQuery<IndexCounter>().Where(
+            TableQuery.CombineFilters(
+                TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, pk),
+                TableOperators.And,
+                TableQuery.GenerateFilterCondition("RowKey", QueryComparisons.Equal, IndexCounterRowKey)));
+
+    // Execute the query and loop through the results (but we'll just use the first result)
+    Int64 index = 0;
+    foreach (IndexCounter ic in await lookupTable.ExecuteQuerySegmentedAsync(query, null))
+    {
+        // Increment the index and make a note of it
+        index = ++ic.index;
+        batchOperation.Replace(ic);
+        break;
+    }
+
+    // No index counter found? Make a new one
+    if (index == 0)
+    {
+        batchOperation.Insert(new IndexCounter(pk, IndexCounterRowKey, 0));
+    }
+    
+    // Generate new shortcode using the index
+    string rk = IndexToShortcode(index);
+    string shortcode = pk + rk;
+
+    // Write updated IndexCounter, plus forward and reverse lookups
+    // Use entity group transaction to write all three in one atomic operation
+    // Uses ETags/correct operation type to deal with concurrency issues, across all 3 entities
+    batchOperation.Insert(new Lookup(pk, rk, uri, encodedUri, shortcode, index));
+    batchOperation.Insert(new Lookup(pk, encodedUri, uri, encodedUri, shortcode, index));
+
+    await lookupTable.ExecuteBatchAsync(batchOperation);
+
+    return ShortcodeToUri(shortcode);
+}
+
+public class Lookup : TableEntity
+{
+    public Lookup() {}
+
+    public Lookup(string pk, string rk, string uri, string encodedUri, string shortcode, Int64 index) 
+        : base(pk, rk)
+    {
+        this.uri = uri;
+        this.encodedUri = encodedUri;
+        this.shortcode = shortcode;
+        this.index = index;
+    }
+
+    public string uri           {get; set;}
+    public string encodedUri    {get; set;}
+    public string shortcode     {get; set;}
+    public Int64  index         {get; set;}
+}
+
+public class IndexCounter : TableEntity
+{
+    public IndexCounter() {}
+
+    public IndexCounter(string pk, string rk, Int64 index)
+     : base(pk, rk)
+    {
+        this.index = index;
+    }
+
+    public Int64 index {get; set;}
+}
+
+public class Response
+{
+    public string originalUri   {get; set;}
+    public string parsedUri     {get; set;}
+    public string shortcut      {get; set;}
+    public string message       {get; set;}
+}
+
+public static string EncodeUri(string uri)
+{
+    var keyBytes = System.Text.Encoding.UTF8.GetBytes(uri);
+    var base64 = System.Convert.ToBase64String(keyBytes);
+    return base64.Replace('/','_');
+}
+
+public const string IndexCounterRowKey = "indexcounter";
+
+public static string IndexToShortcode(Int64 index)
+{
+    if (index < 0)
+        throw new Exception("Illegal Index");
+
+    char[] alphabet = "abcdefghjkmnpqrstuvwxyz23456789".ToCharArray();
+    Int64 modulus = alphabet.Length;
+
+    string code = "";
+    do
+    {
+        code = alphabet[index % modulus] + code;
+        index /= modulus;
+    } while (index > 0);
+
+    return code;
+}
+
+public static string UriToPartitionKey(string str)
+{
+    int hash1 = 5381;
+    int hash2 = hash1;
+
+    for(int i = 0; i < str.Length && str[i] != '\0'; i += 2)
+    {
+        hash1 = ((hash1 << 5) + hash1) ^ str[i];
+        if (i == str.Length - 1 || str[i+1] == '\0')
+            break;
+        hash2 = ((hash2 << 5) + hash2) ^ str[i+1];
+    }
+
+    int hash = Math.Abs(hash1 + (hash2*1566083941));
+
+    string code = IndexToShortcode(hash);
+
+    return code.Substring(0, 2);
+}
+
+public static string ShortcodeToUri(string shortcode)
+{
+    return "http://" 
+    + System.Environment.GetEnvironmentVariable("DomainName", EnvironmentVariableTarget.Process)
+    + "/"
+    + shortcode;
+}
