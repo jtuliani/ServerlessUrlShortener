@@ -1,0 +1,50 @@
+#r "Newtonsoft.Json"
+#r "Microsoft.WindowsAzure.Storage"
+
+using System.Net;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Primitives;
+using Newtonsoft.Json;
+using Microsoft.WindowsAzure.Storage.Table;
+
+public static async Task<IActionResult> Run(HttpRequest req, CloudTable lookupTable, ILogger log)
+{
+    try
+    {
+        string shortcode = req.Query["shortcode"];
+
+        log.LogInformation($"Shortcode: {shortcode}");
+
+        // Parse 'shortcode' into partition key (first 2 characters) and row key (the remainder)
+        string pk = shortcode.Substring(0,2);
+        string rk = shortcode.Substring(2,shortcode.Length-2);
+
+        // Construct table query
+        TableQuery<Lookup> query = new TableQuery<Lookup>().Where(
+                TableQuery.CombineFilters(
+                    TableQuery.GenerateFilterCondition("PartitionKey", QueryComparisons.Equal, pk),
+                    TableOperators.And,
+                    TableQuery.GenerateFilterCondition("RowKey", QueryComparisons.Equal, rk)));
+
+        // Execute the query and loop through the results (but we'll just use the first result)
+        foreach (Lookup lookup in await lookupTable.ExecuteQuerySegmentedAsync(query, null))
+        {
+            log.LogInformation($"Found! URI = {lookup.uri}");
+            return new RedirectResult(lookup.uri);
+        }
+
+        // Create the re-direction response
+        log.LogInformation("Not found");
+        return new NotFoundObjectResult("Forward lookup not found");        
+    }
+    catch (Exception e)
+    {
+        log.LogInformation($"Exception: {e.Message}");
+        return new StatusCodeResult(500);
+    }
+}
+
+public class Lookup : TableEntity
+{
+    public string uri           {get; set;}
+}
