@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <style type="text/css">
+            body, html {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                text-align: center;
+                margin: 0;
+                padding: 0;
+            }
+            #heading {
+                padding: .5em;
+                background-color:lightsteelblue;
+                border-bottom: 1px solid rgb(154, 167, 184);
+                font-size: 2em;
+                font-weight: 600;
+                color: black;
+            }
+            
+            #input {
+                padding: 3em;
+                border-top: 1px solid white;
+                border-bottom: 1px solid rgb(231, 231, 231);
+                background-color:aliceblue;
+                color:black;
+            }
+
+            #url {
+                margin: 1em;
+                width: 25em;
+                font-size: 120%;
+                background-color: white;
+                border: 1px solid grey;
+            }
+
+            #output {
+                padding: 1em;
+                display: none;
+                background-color:darkorange;
+                border-top: 1px solid rgb(253, 188, 67);
+                border-bottom: 1px solid rgb(179, 99, 2);
+                color:black;
+            }
+
+            #shortcut {
+                font-size: 1.2em;
+                font-weight: 600;
+            }
+
+            #error {
+                padding: 1em;
+                display: none;
+                background-color:tomato;
+                color:black;
+            }
+
+        </style>
+    </head>
+    <body onload="UrlChanged(event)">
+        <div id="heading">
+            Serverless URL Shortener
+        </div>
+
+        <div id="input">
+            Enter URL to shorten<br>
+            <input type="text" id="url" onkeyup="UrlChanged(event)" placeholder="Enter URL to shorten, e.g. http://www.my-long-url.com" autofocus> <br>
+            <button onclick="ShortcutRequest()" id="shortcutButton" disabled>Get Shortcut</button> 
+        </div>
+
+        <div id="output">
+            <p id="message"></p>
+            <p id="shortcut"></p>
+            <button onclick="CopyShortcut()">Copy</button>
+            <button onclick="OpenShortcut()">Open</button>
+        </div>
+
+        <div id="error"></div>
+
+    </body>
+</html>
+
+<script>
+    var xmlHttp = null;
+
+    function UrlChanged(event)
+    {
+        var button = document.getElementById("shortcutButton");
+
+        if(event.which == 13 || event.keyCode == 13)
+        {
+            event.preventDefault();
+            button.click();
+        }
+        else
+        {
+            if(document.getElementById("url").value.length == 0)
+            {
+                button.disabled = true;
+            }
+            else
+            {
+                button.disabled = false;
+            }
+        }
+    }
+
+    function ShortcutRequest()
+    {
+        var url = "http://urii.org/api/CreateShortcut?uri=" 
+            + encodeURIComponent(document.getElementById( "url" ).value);
+
+        xmlHttp = new XMLHttpRequest(); 
+        xmlHttp.onreadystatechange = ShortcutResponse;
+        xmlHttp.open( "GET", url, true );
+        xmlHttp.send( null );
+    }
+
+    function ShortcutResponse() 
+    {
+        if (xmlHttp.readyState == 4)
+        {
+            var response = JSON.parse(xmlHttp.responseText);
+
+            if (xmlHttp.status == 200 || xmlHttp.status == 201) 
+            {
+                document.getElementById("message").innerHTML = response.message;
+                document.getElementById("shortcut").innerHTML = response.shortcut;
+                document.getElementById("output").style.display = "block";
+                document.getElementById("error").style.display = "none";
+            }
+            else
+            {
+                document.getElementById("error").innerHTML = response.message;
+                document.getElementById("error").style.display = "block";
+                document.getElementById("output").style.display = "none";
+            }
+        }
+    }
+
+    function CopyShortcut()
+    {
+        var copyText = document.getElementById("shortcut").innerHTML;
+        copyToClipboard(copyText);
+    }
+
+    function OpenShortcut()
+    {
+        var shortcut = document.getElementById("shortcut").innerHTML;
+        window.open(shortcut, '_blank');
+    }
+
+    function copyToClipboard(str)
+    {
+        const el = document.createElement('textarea');
+        el.value = str;
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand('copy');
+        document.body.removeChild(el);
+    }
+
+</script>
